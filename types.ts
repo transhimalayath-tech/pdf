@@ -1,7 +1,16 @@
 export interface PdfFile {
   name: string;
-  data: string; // Base64
-  text: string; // Extracted text
+  url: string; // Blob URL
+}
+
+export interface TextItem {
+  str: string;
+  dir: string;
+  width: number;
+  height: number;
+  transform: number[];
+  fontName: string;
+  hasEncoding: boolean;
 }
 
 export interface ChatMessage {
@@ -9,11 +18,6 @@ export interface ChatMessage {
   role: 'user' | 'model';
   text: string;
   timestamp: number;
-}
-
-export enum EditorMode {
-  EDIT = 'EDIT',
-  CHAT = 'CHAT'
 }
 
 export enum AiAction {

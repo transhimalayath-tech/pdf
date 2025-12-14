@@ -1,41 +1,38 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileText, Download, MessageSquare, Edit3, X, Zap, ChevronRight, ChevronLeft } from 'lucide-react';
-import { PdfFile, ChatMessage, EditorMode, AiAction } from './types';
-import { extractTextFromPdf, generatePdfFromText } from './services/pdfService';
+import { Upload, FileText, Download, MessageSquare, Zap, ZoomIn, ZoomOut, X } from 'lucide-react';
+import { PdfFile, ChatMessage, AiAction } from './types';
+import { getPdfDocument, generatePdfFromContent } from './services/pdfService';
 import { chatWithDocument, performActionOnText } from './services/geminiService';
 import { Button } from './components/Button';
 import { EditorToolbar } from './components/EditorToolbar';
 import { LoadingSpinner } from './components/LoadingSpinner';
+import { EditablePage } from './components/EditablePage';
 
 const App: React.FC = () => {
-  // Store file URL specifically for iframe display to avoid base64 issues
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfFile, setPdfFile] = useState<PdfFile | null>(null);
+  const [pdfDoc, setPdfDoc] = useState<any>(null); // PDFDocumentProxy
+  const [pagesData, setPagesData] = useState<{ [key: number]: string }>({}); // pageNum -> text
   
+  const [scale, setScale] = useState(1.2);
   const [isLoading, setIsLoading] = useState(false);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
-  const [editorText, setEditorText] = useState('');
-  const [mode, setMode] = useState<EditorMode>(EditorMode.EDIT);
   
-  // Chat State
+  // Chat / Assistant Overlay
+  const [showAssistant, setShowAssistant] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Layout State
-  const [leftPanelWidth, setLeftPanelWidth] = useState(50);
-  const isResizing = useRef(false);
+  // Clean up object URL
+  useEffect(() => {
+    return () => {
+      if (pdfFile?.url) URL.revokeObjectURL(pdfFile.url);
+    };
+  }, [pdfFile]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
-
-  // Clean up object URL when component unmounts or file changes
-  useEffect(() => {
-    return () => {
-      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
-    };
-  }, [pdfUrl]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -48,22 +45,17 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     try {
-      // Create Blob URL for display
       const url = URL.createObjectURL(file);
-      setPdfUrl(url);
-
-      const text = await extractTextFromPdf(file);
+      const doc = await getPdfDocument(url);
       
-      setPdfFile({
-        name: file.name,
-        data: "", // We use pdfUrl for display now
-        text: text
-      });
-      setEditorText(text); 
+      setPdfFile({ name: file.name, url });
+      setPdfDoc(doc);
+      setPagesData({}); // Reset text data
+      
       setChatMessages([{
         id: 'welcome',
         role: 'model',
-        text: `I've analyzed **${file.name}**. You can now edit the extracted text or ask me questions about the document!`,
+        text: `I've analyzed **${file.name}**. You can edit the text directly on the pages below, or ask me for help!`,
         timestamp: Date.now()
       }]);
     } catch (error) {
@@ -74,22 +66,53 @@ const App: React.FC = () => {
     }
   };
 
+  const handlePageTextChange = (pageNum: number, text: string) => {
+    setPagesData(prev => ({ ...prev, [pageNum]: text }));
+  };
+
   const handleAiAction = async (action: AiAction) => {
-    if (!editorText.trim()) return;
+    // For global actions, we join all text. 
+    // Note: Applying changes back to absolute positioned elements is extremely hard.
+    // For this demo, we will show the result in the Assistant panel or Alert, 
+    // as we cannot safely reflow the PDF layout automatically.
+    
+    const fullText = Object.values(pagesData).join('\n\n');
+    if (!fullText.trim()) return;
     
     setIsAiProcessing(true);
+    setShowAssistant(true); // Open assistant to show result
+    
+    // Add a system message that we are working
+    setChatMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      role: 'model',
+      text: `Processing ${action}...`,
+      timestamp: Date.now()
+    }]);
+
     try {
-      const result = await performActionOnText(editorText, action);
-      setEditorText(result);
+      const result = await performActionOnText(fullText, action);
+      
+      setChatMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'model',
+        text: `**Here is the result of ${action}:**\n\n${result}\n\n*Note: Due to the fixed layout of PDFs, I cannot automatically apply this large change to the document layout. You can copy this text and manually update specific sections if needed.*`,
+        timestamp: Date.now()
+      }]);
     } catch (error) {
-      alert('AI processing failed.');
+      setChatMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'model',
+        text: "Sorry, I encountered an error processing that request.",
+        timestamp: Date.now()
+      }]);
     } finally {
       setIsAiProcessing(false);
     }
   };
 
   const handleSendMessage = async () => {
-    if (!chatInput.trim() || !pdfFile) return;
+    if (!chatInput.trim()) return;
 
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
@@ -103,12 +126,13 @@ const App: React.FC = () => {
     setIsAiProcessing(true);
 
     try {
+      const fullText = Object.values(pagesData).join('\n\n');
       const history = chatMessages.map(msg => ({
         role: msg.role === 'user' ? 'user' : 'model',
         parts: [{ text: msg.text }]
       }));
 
-      const responseText = await chatWithDocument(userMsg.text, pdfFile.text, history);
+      const responseText = await chatWithDocument(userMsg.text, fullText, history);
 
       const aiMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -125,44 +149,26 @@ const App: React.FC = () => {
   };
 
   const handleDownload = () => {
-    if (!editorText) return;
-    generatePdfFromText(editorText, `edited_${pdfFile?.name || 'document'}.pdf`);
-  };
-
-  const startResize = () => {
-    isResizing.current = true;
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  };
-
-  const onMouseMove = (e: MouseEvent) => {
-    if (!isResizing.current) return;
-    const newWidth = (e.clientX / window.innerWidth) * 100;
-    if (newWidth > 20 && newWidth < 80) {
-      setLeftPanelWidth(newWidth);
+    // Generate new PDF from the collected text
+    const orderedText = [];
+    if (pdfDoc) {
+      for (let i = 1; i <= pdfDoc.numPages; i++) {
+        orderedText.push({ text: pagesData[i] || "" });
+      }
+      generatePdfFromContent(orderedText, `edited_${pdfFile?.name || 'doc'}`);
     }
   };
 
-  const onMouseUp = () => {
-    isResizing.current = false;
-    document.removeEventListener('mousemove', onMouseMove);
-    document.removeEventListener('mouseup', onMouseUp);
-    document.body.style.cursor = 'default';
-    document.body.style.userSelect = 'auto';
-  };
-
-  if (!pdfFile || !pdfUrl) {
+  if (!pdfFile || !pdfDoc) {
     return (
       <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4">
         <div className="max-w-md w-full text-center space-y-8">
           <div className="space-y-2">
             <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
-              Gemini PDF Architect
+              Gemini PDF Editor
             </h1>
             <p className="text-gray-400">
-              Extract, Edit, and Reimagine your PDFs with AI.
+              Directly edit text on your PDF documents.
             </p>
           </div>
 
@@ -181,26 +187,11 @@ const App: React.FC = () => {
                   <Upload size={32} />
                 </div>
                 <div>
-                  <h3 className="text-lg font-medium text-white">Drop your PDF here</h3>
-                  <p className="text-sm text-gray-400 mt-1">or click to browse</p>
+                  <h3 className="text-lg font-medium text-white">Drop PDF to Edit</h3>
+                  <p className="text-sm text-gray-400 mt-1">Click to browse</p>
                 </div>
               </div>
             )}
-          </div>
-          
-          <div className="grid grid-cols-3 gap-4 text-center text-sm text-gray-500">
-            <div className="flex flex-col items-center gap-2">
-              <div className="p-2 bg-gray-800 rounded-lg"><FileText size={16} /></div>
-              <span>Extract Text</span>
-            </div>
-            <div className="flex flex-col items-center gap-2">
-              <div className="p-2 bg-gray-800 rounded-lg"><Zap size={16} /></div>
-              <span>AI Rewrite</span>
-            </div>
-            <div className="flex flex-col items-center gap-2">
-              <div className="p-2 bg-gray-800 rounded-lg"><MessageSquare size={16} /></div>
-              <span>Chat with PDF</span>
-            </div>
           </div>
         </div>
       </div>
@@ -208,21 +199,43 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-900">
-      {/* Header */}
-      <header className="h-14 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 shrink-0 z-10">
-        <div className="flex items-center gap-2">
-          <FileText className="text-blue-500" size={20} />
-          <span className="font-semibold text-gray-100 truncate max-w-[200px]">{pdfFile.name}</span>
+    <div className="h-screen flex flex-col bg-gray-900 overflow-hidden">
+      {/* Top Header */}
+      <header className="h-16 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-4 shrink-0 z-50">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+             <FileText className="text-blue-500" size={24} />
+             <div>
+               <h1 className="font-bold text-gray-100 leading-tight truncate max-w-[200px]">{pdfFile.name}</h1>
+               <p className="text-xs text-gray-400">{pdfDoc.numPages} pages</p>
+             </div>
+          </div>
+          <div className="h-8 w-px bg-gray-700 mx-2" />
+          <div className="flex items-center bg-gray-900 rounded-lg p-1 border border-gray-700">
+            <button onClick={() => setScale(s => Math.max(0.5, s - 0.1))} className="p-1 hover:text-white text-gray-400"><ZoomOut size={16} /></button>
+            <span className="text-xs font-mono w-12 text-center">{Math.round(scale * 100)}%</span>
+            <button onClick={() => setScale(s => Math.min(3, s + 0.1))} className="p-1 hover:text-white text-gray-400"><ZoomIn size={16} /></button>
+          </div>
         </div>
+
+        {/* Toolbar for Actions */}
+        <div className="flex-1 flex justify-center px-4">
+           <EditorToolbar 
+              onAction={handleAiAction} 
+              isProcessing={isAiProcessing} 
+              onClear={() => {}} 
+              onCopy={() => {}} 
+           />
+        </div>
+
         <div className="flex items-center gap-3">
           <Button 
-            variant="ghost" 
+            variant={showAssistant ? "primary" : "secondary"} 
             size="sm" 
-            onClick={() => { setPdfFile(null); setPdfUrl(null); }}
-            icon={<X size={16} />}
+            onClick={() => setShowAssistant(!showAssistant)}
+            icon={<MessageSquare size={16} />}
           >
-            Close
+            Assistant
           </Button>
           <Button 
             variant="primary" 
@@ -230,161 +243,75 @@ const App: React.FC = () => {
             onClick={handleDownload}
             icon={<Download size={16} />}
           >
-            Export PDF
+            Export
+          </Button>
+           <Button 
+            variant="ghost" 
+            size="sm" 
+            onClick={() => { setPdfFile(null); setPdfDoc(null); }}
+            icon={<X size={16} />}
+          >
+            Close
           </Button>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 flex overflow-hidden relative">
-        {/* Left Panel: PDF Viewer */}
-        <div style={{ width: `${leftPanelWidth}%` }} className="h-full bg-gray-800 relative flex flex-col border-r border-gray-700">
-           <div className="h-8 bg-gray-900 text-gray-400 text-xs flex items-center px-4 uppercase tracking-wider font-semibold border-b border-gray-700">
-             Original Document
-           </div>
-           <div className="flex-1 w-full bg-gray-700 relative">
-             <iframe 
-               src={pdfUrl} 
-               className="w-full h-full border-none" 
-               title="PDF Viewer"
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Main Canvas Scroll Area */}
+        <div className="flex-1 overflow-auto bg-gray-900/50 p-8 flex flex-col items-center gap-8">
+           {Array.from({ length: pdfDoc.numPages }, (_, i) => i + 1).map((pageNum) => (
+             <EditablePage 
+               key={pageNum}
+               pageNumber={pageNum}
+               pdfDoc={pdfDoc}
+               scale={scale}
+               onTextChange={handlePageTextChange}
              />
-             {isResizing.current && <div className="absolute inset-0 z-50 bg-transparent" />}
-           </div>
+           ))}
         </div>
 
-        {/* Resizer Handle */}
-        <div 
-          onMouseDown={startResize}
-          className="w-1 bg-gray-900 hover:bg-blue-500 cursor-col-resize z-50 transition-colors flex items-center justify-center"
-        >
-          <div className="w-0.5 h-8 bg-gray-600 rounded-full" />
-        </div>
-
-        {/* Right Panel: Editor / Chat */}
-        <div style={{ width: `${100 - leftPanelWidth}%` }} className="h-full flex flex-col bg-gray-900">
-          
-          {/* Right Panel Tabs */}
-          <div className="h-10 flex border-b border-gray-700 bg-gray-800 shrink-0">
-            <button 
-              onClick={() => setMode(EditorMode.EDIT)}
-              className={`flex-1 flex items-center justify-center gap-2 text-sm font-medium transition-colors ${
-                mode === EditorMode.EDIT 
-                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800' 
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
-              }`}
-            >
-              <Edit3 size={16} /> Document Editor
-            </button>
-            <button 
-              onClick={() => setMode(EditorMode.CHAT)}
-              className={`flex-1 flex items-center justify-center gap-2 text-sm font-medium transition-colors ${
-                mode === EditorMode.CHAT 
-                ? 'text-purple-400 border-b-2 border-purple-400 bg-gray-800' 
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
-              }`}
-            >
-              <MessageSquare size={16} /> Assistant
-            </button>
-          </div>
-
-          {/* Editor Mode */}
-          {mode === EditorMode.EDIT && (
-            <div className="flex-1 flex flex-col overflow-hidden bg-gray-800/50">
-              <EditorToolbar 
-                onAction={handleAiAction} 
-                isProcessing={isAiProcessing}
-                onClear={() => setEditorText('')}
-                onCopy={() => navigator.clipboard.writeText(editorText)}
-              />
-              
-              {/* Document "Page" Container */}
-              <div className="flex-1 overflow-y-auto p-8 flex justify-center bg-gray-200/5">
-                 <div className="relative w-full max-w-4xl min-h-[800px] h-fit bg-white text-gray-900 shadow-2xl rounded-sm">
-                    {isAiProcessing && (
-                      <div className="absolute inset-0 bg-white/80 z-20 flex items-center justify-center backdrop-blur-sm">
-                        <div className="bg-white p-4 rounded-xl shadow-xl border border-gray-200 flex flex-col items-center gap-3">
-                          <LoadingSpinner />
-                          <span className="text-blue-600 font-medium animate-pulse">Gemini is rewriting...</span>
-                        </div>
-                      </div>
-                    )}
-                    <textarea 
-                      className="w-full h-full min-h-[800px] p-12 bg-transparent resize-none focus:outline-none font-serif text-lg leading-relaxed text-gray-800 selection:bg-blue-200 selection:text-blue-900"
-                      value={editorText}
-                      onChange={(e) => setEditorText(e.target.value)}
-                      placeholder="Extracted text will appear here..."
-                      spellCheck={false}
-                    />
-                 </div>
-              </div>
-              
-              <div className="h-6 bg-gray-800 text-gray-500 text-xs flex items-center px-4 border-t border-gray-700 justify-between shrink-0">
-                <span>{editorText.length} characters</span>
-                <span>A4 Layout Preview</span>
-              </div>
-            </div>
-          )}
-
-          {/* Chat Mode */}
-          {mode === EditorMode.CHAT && (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* Assistant Panel (Overlay/Sidebar) */}
+        {showAssistant && (
+          <div className="w-96 bg-gray-800 border-l border-gray-700 flex flex-col shadow-2xl z-40 absolute right-0 top-0 bottom-0">
+             <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-800">
+               <h3 className="font-semibold text-white flex items-center gap-2">
+                 <Zap size={16} className="text-yellow-400" /> AI Assistant
+               </h3>
+               <button onClick={() => setShowAssistant(false)} className="text-gray-400 hover:text-white"><X size={16} /></button>
+             </div>
+             
+             <div className="flex-1 overflow-y-auto p-4 space-y-4">
                 {chatMessages.map((msg) => (
-                  <div 
-                    key={msg.id} 
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div 
-                      className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
-                        msg.role === 'user' 
-                          ? 'bg-blue-600 text-white rounded-br-none' 
-                          : 'bg-gray-700 text-gray-100 rounded-bl-none border border-gray-600'
-                      }`}
-                    >
-                      {msg.text.split('\n').map((line, i) => (
-                        <p key={i} className={i > 0 ? 'mt-2' : ''}>{line}</p>
-                      ))}
+                  <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[90%] rounded-xl px-4 py-3 text-sm shadow-sm ${
+                        msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-100 border border-gray-600'
+                      }`}>
+                      <div className="whitespace-pre-wrap">{msg.text}</div>
                     </div>
                   </div>
                 ))}
-                {isAiProcessing && (
-                  <div className="flex justify-start">
-                    <div className="bg-gray-700 rounded-2xl rounded-bl-none px-4 py-3 border border-gray-600">
-                      <div className="flex gap-1">
-                        <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                        <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                        <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                      </div>
-                    </div>
-                  </div>
-                )}
                 <div ref={chatEndRef} />
-              </div>
-              
-              <div className="p-4 bg-gray-800 border-t border-gray-700">
+             </div>
+
+             <div className="p-4 border-t border-gray-700 bg-gray-900">
                 <div className="relative">
                   <input
                     type="text"
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && !isAiProcessing && handleSendMessage()}
-                    placeholder="Ask Gemini about the document..."
+                    placeholder="Ask about the document..."
                     disabled={isAiProcessing}
-                    className="w-full bg-gray-900 text-white pl-4 pr-12 py-3 rounded-xl border border-gray-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none transition-all placeholder-gray-500"
+                    className="w-full bg-gray-800 text-white pl-4 pr-10 py-2.5 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none text-sm"
                   />
-                  <button
-                    onClick={handleSendMessage}
-                    disabled={!chatInput.trim() || isAiProcessing}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    <Zap size={20} fill="currentColor" />
+                  <button onClick={handleSendMessage} disabled={!chatInput.trim()} className="absolute right-2 top-1/2 -translate-y-1/2 text-blue-400 hover:text-blue-300">
+                    <Zap size={18} />
                   </button>
                 </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </main>
+             </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
