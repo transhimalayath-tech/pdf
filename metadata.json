@@ -1,0 +1,5 @@
+{
+  "name": "Gemini PDF Architect",
+  "description": "An intelligent dual-pane PDF editor and assistant. Upload a PDF to view it, extract its text using AI, refine content with smart editing tools, and export your remastered document. Features text extraction, AI-powered rewriting, summarization, and PDF generation.",
+  "requestFramePermissions": []
+}
