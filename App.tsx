@@ -60,7 +60,10 @@ const App: React.FC = () => {
       }]);
     } catch (error) {
       console.error(error);
-      alert('Failed to process PDF. Please try another file.');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      alert(`Failed to load PDF: ${errorMessage}\n\nPlease try a different file or check your connection.`);
+      // Clean up the URL if we failed
+      URL.revokeObjectURL(URL.createObjectURL(file)); 
     } finally {
       setIsLoading(false);
     }
@@ -71,18 +74,12 @@ const App: React.FC = () => {
   };
 
   const handleAiAction = async (action: AiAction) => {
-    // For global actions, we join all text. 
-    // Note: Applying changes back to absolute positioned elements is extremely hard.
-    // For this demo, we will show the result in the Assistant panel or Alert, 
-    // as we cannot safely reflow the PDF layout automatically.
-    
     const fullText = Object.values(pagesData).join('\n\n');
     if (!fullText.trim()) return;
     
     setIsAiProcessing(true);
-    setShowAssistant(true); // Open assistant to show result
+    setShowAssistant(true); 
     
-    // Add a system message that we are working
     setChatMessages(prev => [...prev, {
       id: Date.now().toString(),
       role: 'model',
@@ -96,7 +93,7 @@ const App: React.FC = () => {
       setChatMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        text: `**Here is the result of ${action}:**\n\n${result}\n\n*Note: Due to the fixed layout of PDFs, I cannot automatically apply this large change to the document layout. You can copy this text and manually update specific sections if needed.*`,
+        text: `**Here is the result of ${action}:**\n\n${result}\n\n*Note: You can copy this text and manually update specific sections if needed.*`,
         timestamp: Date.now()
       }]);
     } catch (error) {
@@ -149,7 +146,6 @@ const App: React.FC = () => {
   };
 
   const handleDownload = () => {
-    // Generate new PDF from the collected text
     const orderedText = [];
     if (pdfDoc) {
       for (let i = 1; i <= pdfDoc.numPages; i++) {

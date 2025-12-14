@@ -1,35 +1,34 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import { jsPDF } from 'jspdf';
 
-// Robustly resolve the PDF.js module object
-// Depending on the CDN and bundling, the exports might be on 'default' or top-level.
-const pdfjs: any = (pdfjsLib as any).default || pdfjsLib;
+// Extract the PDF.js object. 
+// esm.sh typically provides the library as the default export, but we check both.
+const pdfjs: any = (pdfjsLib as any).default ?? pdfjsLib;
 
-// Ensure GlobalWorkerOptions is available on the object we are using
-if (!pdfjs.GlobalWorkerOptions && (pdfjsLib as any).GlobalWorkerOptions) {
-  pdfjs.GlobalWorkerOptions = (pdfjsLib as any).GlobalWorkerOptions;
-}
-
-// Initialize PDF.js worker
-// Using jsDelivr to match the main library import in index.html.
-// This ensures version consistency and avoids mismatches between the API and the Worker.
+// Configure the worker.
+// We use cdnjs for the worker script because it serves the file with correct CORS headers
+// and MIME types, which is critical for browser Worker instantiation.
 if (pdfjs.GlobalWorkerOptions) {
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js`;
+  pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
 export const getPdfDocument = async (url: string) => {
   try {
-    // We pass cMapUrl and cMapPacked to ensure fonts load correctly.
-    // Using jsDelivr for cMaps as well.
+    // Configure loading task
+    // We use cdnjs for standard font maps (CMaps) to ensure text extracts correctly.
     const loadingTask = pdfjs.getDocument({
       url,
-      cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
+      cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
       cMapPacked: true,
+      enableXfa: true, // Attempt to handle XFA forms if present
     });
-    return await loadingTask.promise;
+
+    const doc = await loadingTask.promise;
+    return doc;
   } catch (error) {
-    console.error("PDF Loading failed:", error);
-    throw new Error(`Failed to load PDF document: ${error instanceof Error ? error.message : String(error)}`);
+    console.error("PDF Loading service failed:", error);
+    // Rethrow with a user-friendly message
+    throw new Error(`Could not parse PDF: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 };
 
@@ -54,7 +53,6 @@ export const generatePdfFromContent = (pages: { text: string }[], filename: stri
       cursorY = 20;
     }
 
-    // Attempt to split by newlines first to preserve paragraph structure if present
     const paragraphs = page.text.split('\n');
     
     paragraphs.forEach(paragraph => {
@@ -67,7 +65,6 @@ export const generatePdfFromContent = (pages: { text: string }[], filename: stri
             doc.text(lines[i], margin, cursorY);
             cursorY += lineHeight;
         }
-        // Add extra space after paragraph
         cursorY += lineHeight * 0.5; 
     });
   });
